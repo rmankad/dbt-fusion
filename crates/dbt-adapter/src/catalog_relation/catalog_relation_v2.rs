@@ -319,9 +319,11 @@ fn reject_unsupported_snowflake_linked_v2_model_fields(
     model: &Value,
     type_name: &str,
 ) -> AdapterResult<()> {
-    if CatalogRelation::get_model_config_value(model, FIELD_TRANSIENT, AdapterType::Snowflake)
-        .is_some()
-    {
+    // Only an explicit `transient: true` is a real conflict for Iceberg. An inherited
+    // or explicit `transient: false` (e.g. a project-wide `+transient` default that
+    // resolves to false) is compatible and ignored, since Iceberg relations are always
+    // non-transient. Matches dbt-core.
+    if parse_model_bool(model, FIELD_TRANSIENT, AdapterType::Snowflake)? == Some(true) {
         return Err(AdapterError::new(
             AdapterErrorKind::Configuration,
             "transient may not be specified for ICEBERG catalogs. Snowflake built-in catalog DDL does not support transient ICEBERG tables.",
@@ -559,7 +561,11 @@ impl CatalogRelation {
         catalog: &CatalogSpecV2View<'_>,
         catalog_name: &str,
     ) -> AdapterResult<CatalogRelation> {
-        if Self::get_model_config_value(model, FIELD_TRANSIENT, AdapterType::Snowflake).is_some() {
+        // Only an explicit `transient: true` is a real conflict for Iceberg. An inherited
+        // or explicit `transient: false` (e.g. a project-wide `+transient` default that
+        // resolves to false) is compatible and ignored, since Iceberg relations are always
+        // non-transient. Matches dbt-core.
+        if parse_model_bool(model, FIELD_TRANSIENT, AdapterType::Snowflake)? == Some(true) {
             return Err(AdapterError::new(
                 AdapterErrorKind::Configuration,
                 "transient may not be specified for ICEBERG catalogs. Snowflake built-in catalog DDL does not support transient ICEBERG tables.",
@@ -1477,6 +1483,130 @@ catalogs:
             assert!(format!("{err}").contains(
                 "Snowflake v2 unity does not support model field 'external_volume' yet."
             ));
+        }
+    }
+
+    #[test]
+    fn snowflake_v2_horizon_transient_false_is_ok() {
+        // An inherited/explicit `transient: false` is compatible with Iceberg (which is
+        // always non-transient) and must not error. Regression test for #15427.
+        let catalogs = load_catalogs_yaml(
+            r#"
+catalogs:
+  - name: my_horizon
+    type: horizon
+    table_format: iceberg
+    config:
+      snowflake:
+        external_volume: "EV"
+"#,
+        );
+        let conf = json!({ "catalog_name": "my_horizon", "transient": false });
+        let ms = [
+            model(AdapterType::Snowflake, conf.clone()),
+            model_deprecated_config(conf),
+        ];
+
+        for m in ms {
+            let r = from_model_config_and_catalogs_v2(
+                AdapterType::Snowflake,
+                &m,
+                Arc::new(catalogs.clone()),
+            )
+            .unwrap();
+            assert_eq!(r.is_transient, Some(false));
+        }
+    }
+
+    #[test]
+    fn snowflake_v2_horizon_transient_true_is_error() {
+        let catalogs = load_catalogs_yaml(
+            r#"
+catalogs:
+  - name: my_horizon
+    type: horizon
+    table_format: iceberg
+    config:
+      snowflake:
+        external_volume: "EV"
+"#,
+        );
+        let conf = json!({ "catalog_name": "my_horizon", "transient": true });
+        let ms = [
+            model(AdapterType::Snowflake, conf.clone()),
+            model_deprecated_config(conf),
+        ];
+
+        for m in ms {
+            let err = from_model_config_and_catalogs_v2(
+                AdapterType::Snowflake,
+                &m,
+                Arc::new(catalogs.clone()),
+            )
+            .unwrap_err();
+            assert!(format!("{err}").contains("transient may not be specified for ICEBERG"));
+        }
+    }
+
+    #[test]
+    fn snowflake_v2_unity_transient_false_is_ok() {
+        // The snowflake-linked (unity/glue/iceberg_rest) path rejects a `transient: true`
+        // like Horizon, but must accept an inherited/explicit `transient: false`. #15427.
+        let catalogs = load_catalogs_yaml(
+            r#"
+catalogs:
+  - name: UC
+    type: unity
+    table_format: iceberg
+    config:
+      snowflake:
+        catalog_database: "MY_CLD"
+"#,
+        );
+        let conf = json!({ "catalog_name": "UC", "transient": false });
+        let ms = [
+            model(AdapterType::Snowflake, conf.clone()),
+            model_deprecated_config(conf),
+        ];
+
+        for m in ms {
+            let r = from_model_config_and_catalogs_v2(
+                AdapterType::Snowflake,
+                &m,
+                Arc::new(catalogs.clone()),
+            )
+            .unwrap();
+            assert_eq!(r.catalog_type, CatalogType::SnowflakeIcebergRest.as_str());
+        }
+    }
+
+    #[test]
+    fn snowflake_v2_unity_transient_true_is_error() {
+        let catalogs = load_catalogs_yaml(
+            r#"
+catalogs:
+  - name: UC
+    type: unity
+    table_format: iceberg
+    config:
+      snowflake:
+        catalog_database: "MY_CLD"
+"#,
+        );
+        let conf = json!({ "catalog_name": "UC", "transient": true });
+        let ms = [
+            model(AdapterType::Snowflake, conf.clone()),
+            model_deprecated_config(conf),
+        ];
+
+        for m in ms {
+            let err = from_model_config_and_catalogs_v2(
+                AdapterType::Snowflake,
+                &m,
+                Arc::new(catalogs.clone()),
+            )
+            .unwrap_err();
+            assert!(format!("{err}").contains("transient may not be specified for ICEBERG"));
         }
     }
 

@@ -855,7 +855,11 @@ impl CatalogRelation {
             // table_format='iceberg' (legacy path)
             // ====================================
             Some(table_format) if table_format.eq_ignore_ascii_case(ICEBERG_TABLE_FORMAT) => {
-                if transient_spec.is_some() {
+                // Only an explicit `transient: true` is a real conflict for Iceberg.
+                // An inherited or explicit `transient: false` (e.g. a project-wide
+                // `+transient` default that resolves to false) is compatible and ignored,
+                // since Iceberg relations are always non-transient. Matches dbt-core.
+                if transient_parsed == Some(true) {
                     return Err(AdapterError::new(
                         AdapterErrorKind::Configuration,
                         "transient may not be specified for ICEBERG catalogs. Snowflake built-in catalog DDL does not support transient ICEBERG tables.",
@@ -1062,10 +1066,18 @@ impl CatalogRelation {
         }
 
         // 5) transient handling
-        let transient_spec =
-            Self::get_model_config_value(model, "transient", AdapterType::Snowflake);
+        //
+        // Only an explicit `transient: true` is a real conflict for Iceberg. An
+        // inherited or explicit `transient: false` (e.g. a project-wide `+transient`
+        // default that resolves to false) is compatible and ignored, since Iceberg
+        // relations are always non-transient. Matches dbt-core.
+        let transient_parsed =
+            Self::get_model_config_value(model, "transient", AdapterType::Snowflake)
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case("true"));
 
-        if table_format.eq_ignore_ascii_case(ICEBERG_TABLE_FORMAT) && transient_spec.is_some() {
+        if table_format.eq_ignore_ascii_case(ICEBERG_TABLE_FORMAT) && transient_parsed == Some(true)
+        {
             return Err(AdapterError::new(
                 AdapterErrorKind::Configuration,
                 "transient may not be specified for ICEBERG catalogs. Snowflake built-in catalog DDL does not support transient ICEBERG tables.",
@@ -2158,8 +2170,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_iceberg_any_transient_specified_is_error() {
+    fn legacy_iceberg_transient_false_is_ok() {
+        // An inherited/explicit `transient: false` is compatible with Iceberg (which is
+        // always non-transient) and must not error. Regression test for #15427.
         let conf = json!({ "table_format": "ICEBERG", "transient": false });
+        let ms = [
+            model(AdapterType::Snowflake, conf.clone()),
+            model_deprecated_config(conf),
+        ];
+        for m in ms {
+            let r = CatalogRelation::build_without_catalogs_yml(&m).unwrap();
+            assert!(!r.is_transient.unwrap());
+        }
+    }
+
+    #[test]
+    fn legacy_iceberg_transient_true_is_error() {
+        let conf = json!({ "table_format": "ICEBERG", "transient": true });
         let ms = [
             model(AdapterType::Snowflake, conf.clone()),
             model_deprecated_config(conf),
@@ -2198,7 +2225,23 @@ mod tests {
     }
 
     #[test]
-    fn catalogs_iceberg_any_transient_specified_is_error() {
+    fn catalogs_iceberg_transient_false_is_ok() {
+        // An inherited/explicit `transient: false` is compatible with Iceberg (which is
+        // always non-transient) and must not error. Regression test for #15427.
+        let cats = catalogs_yaml_one("CAT", "WIN", "BUILT_IN", "ICEBERG", &[]);
+        let conf = json!({ "catalog_name": "CAT", "transient": false });
+        let ms = [
+            model(AdapterType::Snowflake, conf.clone()),
+            model_deprecated_config(conf),
+        ];
+        for m in ms {
+            let r = CatalogRelation::build_with_catalogs(&m, &cats, "CAT").unwrap();
+            assert!(!r.is_transient.unwrap());
+        }
+    }
+
+    #[test]
+    fn catalogs_iceberg_transient_true_is_error() {
         let cats = catalogs_yaml_one("CAT", "WIN", "BUILT_IN", "ICEBERG", &[]);
         let conf = json!({ "catalog_name": "CAT", "transient": true });
         let ms = [

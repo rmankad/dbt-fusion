@@ -1,0 +1,10 @@
+kind: Fixes
+body: '[Snowflake] Do not error on an inherited or explicit `transient: false` for
+    Iceberg models; only an explicit `transient: true` is a conflict. Restores parity
+    with dbt-core so a project-wide `+transient` default no longer blocks Iceberg materializations
+    (dbt-labs/dbt-core#15427).'
+time: 2026-07-07T12:00:00.000000-07:00
+custom:
+    author: rmankad
+    issue: ""
+    project: dbt-fusion
